@@ -170,7 +170,10 @@ fun LocalSettingScreen(
                         SelectOption("关闭", "0"),
                         SelectOption("预载一张", "1"),
                         SelectOption("预载两张", "2"),
-                        SelectOption("预载三张", "3")
+                        SelectOption("预载三张", "3"),
+                        SelectOption("预载五张", "5"),
+                        SelectOption("预载七张", "7"),
+                        SelectOption("预载十张", "10")
                     )
                 }
             }

@@ -23,7 +23,9 @@ import coil.size.Size
 import com.par9uet.jm.cache.getCommonPicDecodeCacheDir
 import com.par9uet.jm.utils.compressWebpCompat
 import com.par9uet.jm.utils.md5
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -53,15 +55,56 @@ class ComicPicImageState(
     }
 
     var imageResultState by mutableStateOf<ImageResultState>(ImageResultState.Loading)
+    private var isDecoding = false
 
     suspend fun decode(context: Context) {
-        withContext(Dispatchers.Default) {
-            imageResultState = ImageResultState.Loading
-            decodeImage(context)
+        // 如果已经成功加载，不重复解码
+        if (imageResultState is ImageResultState.Success) {
+            return
+        }
+        // 如果正在解码中，避免重复
+        if (isDecoding) {
+            return
+        }
+        isDecoding = true
+        try {
+            withContext(Dispatchers.Default) {
+                imageResultState = ImageResultState.Loading
+                decodeImage(context)
+            }
+        } finally {
+            isDecoding = false
         }
     }
 
     private suspend fun decodeImage(context: Context) {
+        // 检查是否是本地文件且不需要解密
+        val isLocalFile = File(originSrc).exists()
+        val needDecrypt = !(isGif() || comicId <= __scrambleId || __speed == "1")
+
+        // 对于本地文件且不需要解密的情况，直接加载，不走 webp 缓存
+        if (isLocalFile && !needDecrypt) {
+            val request = ImageRequest.Builder(context)
+                .data(originSrc)
+                .size { Size.ORIGINAL }
+                .allowHardware(false)
+                .build()
+
+            when (val result = picImageLoader.execute(request)) {
+                is SuccessResult -> {
+                    val bitmap = result.drawable.toBitmap().asImageBitmap()
+                    val aspectRatio = bitmap.width * 1.0f / bitmap.height
+                    imageResultState = ImageResultState.Success(bitmap, aspectRatio)
+                }
+                is ErrorResult -> {
+                    Log.d("comic pic", result.throwable.stackTraceToString())
+                    imageResultState = ImageResultState.Failure("加载失败")
+                }
+            }
+            return
+        }
+
+        // 需要解密的图片走 webp 缓存流程
         val cacheDir = getCommonPicDecodeCacheDir(context, comicId)
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
@@ -95,15 +138,30 @@ class ComicPicImageState(
                 val decodeImageAspectRatio =
                     originalImageBitmap.width * 1.0f / originalImageBitmap.height
                 var decodedImageBitmap = originalImageBitmap
+                var bitmapToCache = originalBitmap
+
                 if (isGif() || comicId <= __scrambleId || __speed == "1") {
-                    saveBitmapAsWebp(originalBitmap, cacheFile)
+                    // 本地缓存，不需要解密
+                    bitmapToCache = originalBitmap
                 } else {
+                    // 需要解密
                     val decodedBitmap = decodeBitmap(originalBitmap, page)
-                    saveBitmapAsWebp(decodedBitmap, cacheFile)
                     decodedImageBitmap = decodedBitmap.asImageBitmap()
+                    bitmapToCache = decodedBitmap
                 }
+
+                // 先设置状态，立即显示图片
                 imageResultState =
                     ImageResultState.Success(decodedImageBitmap, decodeImageAspectRatio)
+
+                // 然后异步保存 webp 缓存，不阻塞显示
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    try {
+                        saveBitmapAsWebp(bitmapToCache, cacheFile)
+                    } catch (e: Exception) {
+                        Log.d("comic pic", "Failed to save webp cache: ${e.message}")
+                    }
+                }
             }
 
             is ErrorResult -> {

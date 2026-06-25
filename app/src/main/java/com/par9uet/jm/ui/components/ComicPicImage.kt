@@ -9,6 +9,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +29,14 @@ fun ComicPicImage(
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val imageResult = comicPicImageState.imageResultState
+
+    // 当组件被组合且状态是 Loading 时，主动触发一次解码
+    // 这样即使 ViewModel 没有预加载到，也能自动加载
+    LaunchedEffect(comicPicImageState.index) {
+        if (comicPicImageState.imageResultState is ImageResultState.Loading) {
+            comicPicImageState.decode(context)
+        }
+    }
 
     val retryImageDecode = {
         coroutineScope.launch {

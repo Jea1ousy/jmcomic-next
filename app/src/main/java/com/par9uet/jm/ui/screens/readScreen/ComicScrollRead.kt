@@ -75,14 +75,14 @@ fun ComicScrollRead(
         launch {
             snapshotFlow { lazyListState.firstVisibleItemIndex }
                 .distinctUntilChanged()
-                .debounce(1000)
                 .collect {
                     if (programmaticScroll) return@collect
                     log("lazyListState.firstVisibleItemIndex currentIndexState = $currentIndexState it = $it")
                     if (currentIndexState != it) {
                         currentIndexState = it
                         onUpdateSliderValue(it.toFloat())
-                        comicReadViewModel.decodeIndex(currentIndexState, context)
+                        // 滚动模式：立即解码当前页和附近5页
+                        comicReadViewModel.decodeScrollMode(currentIndexState, context)
                     }
                 }
         }

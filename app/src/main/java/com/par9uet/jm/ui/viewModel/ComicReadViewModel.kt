@@ -58,6 +58,7 @@ class ComicReadViewModel(
     val size: Int get() = _comicPicState.value.data?.size ?: 0
 
     private val prefetchSet = mutableSetOf<Int>()
+    private val decodeJobs = mutableMapOf<Int, kotlinx.coroutines.Job>()
 
     // Reading progress tracking
     private var currentComicId: Int = 0
@@ -216,6 +217,8 @@ class ComicReadViewModel(
                 )
             }
             prefetchSet.clear()
+            decodeJobs.values.forEach { it.cancel() }
+            decodeJobs.clear()
             when (val data = comicRepository.getComicPicList(comicId, shunt)) {
                 is NetWorkResult.Error -> {
                     _comicPicState.update {
@@ -262,6 +265,8 @@ class ComicReadViewModel(
                 )
             }
             prefetchSet.clear()
+            decodeJobs.values.forEach { it.cancel() }
+            decodeJobs.clear()
             val downloadComic = downloadComicDao.getById(comicId)
             val imageDir = ensureLocalImageDir(context, comicId, downloadComic?.zipPath.orEmpty())
             val files = imageDir
@@ -342,6 +347,63 @@ class ComicReadViewModel(
         }
     }
 
+    fun decodeScrollMode(index: Int, context: Context) {
+        log("decode scroll mode $index")
+        val count = localSettingManager.localSettingState.value.prefetchCount
+        // 滚动模式：预加载范围更大，至少5页
+        val expandedCount = max(count, 5)
+        val start = max(0, index - expandedCount)
+        val end = min(size - 1, index + expandedCount)
+
+        // 取消不在当前范围内的预加载任务
+        val toCancel = decodeJobs.keys.filter { it !in start..end }
+        toCancel.forEach { jobIndex ->
+            decodeJobs[jobIndex]?.cancel()
+            decodeJobs.remove(jobIndex)
+            prefetchSet.remove(jobIndex)
+        }
+
+        // 优先解码当前页和紧邻的页面（高优先级）
+        decodeWithPriority(index, context, highPriority = true)
+        if (index + 1 <= end) decodeWithPriority(index + 1, context, highPriority = true)
+        if (index - 1 >= start) decodeWithPriority(index - 1, context, highPriority = true)
+
+        // 然后批量预加载后续页面（低优先级）
+        for (i in index + 2..end) {
+            decodeWithPriority(i, context, highPriority = false)
+        }
+        // 最后预加载前面的页面（低优先级）
+        for (i in index - 2 downTo start) {
+            decodeWithPriority(i, context, highPriority = false)
+        }
+    }
+
+    fun decodeCurrentPageOnly(index: Int, context: Context) {
+        log("decode current page only $index")
+        // 立即解码当前页和下一页（因为 LazyColumn 通常会预加载下一页）
+        decode(index, context)
+        if (index + 1 < size) {
+            decode(index + 1, context)
+        }
+    }
+
+    fun prefetchAroundIndex(index: Int, context: Context) {
+        log("prefetch around index $index")
+        val count = localSettingManager.localSettingState.value.prefetchCount
+        val start = max(0, index - count)
+        val end = min(size - 1, index + count)
+
+        // 预加载周围的页面，跳过当前页和下一页（已经解码过了）
+        for (i in index + 2..end) {
+            log("prefetch decode index $i")
+            decode(i, context)
+        }
+        for (i in index - 1 downTo start) {
+            log("prefetch decode index $i")
+            decode(i, context)
+        }
+    }
+
     fun prev(context: Context) {
         hideToolBar()
         val index = max(0, currentIndexState.intValue - 1)
@@ -360,15 +422,56 @@ class ComicReadViewModel(
 
     private fun decode(index: Int, context: Context, onComplete: (() -> Unit)? = null) {
         val comicPicImageState = comicPicState.value.data?.getOrNull(index) ?: return
-        if (prefetchSet.contains(index)) {
+
+        // 如果已经解码成功，跳过
+        if (comicPicImageState.imageResultState is com.par9uet.jm.data.models.ImageResultState.Success) {
             onComplete?.invoke()
             return
         }
+
+        // 如果正在解码中（已在 prefetchSet 但状态是 Loading），也跳过避免重复
+        if (prefetchSet.contains(index) &&
+            comicPicImageState.imageResultState is com.par9uet.jm.data.models.ImageResultState.Loading) {
+            onComplete?.invoke()
+            return
+        }
+
+        prefetchSet.add(index)
         viewModelScope.launch {
             comicPicImageState.decode(context)
             onComplete?.invoke()
         }
+    }
+
+    private fun decodeWithPriority(index: Int, context: Context, highPriority: Boolean) {
+        val comicPicImageState = comicPicState.value.data?.getOrNull(index) ?: return
+
+        // 如果已经解码成功，跳过
+        if (comicPicImageState.imageResultState is com.par9uet.jm.data.models.ImageResultState.Success) {
+            return
+        }
+
+        // 如果是高优先级且已有任务在执行，取消旧任务重新执行
+        if (highPriority && decodeJobs.containsKey(index)) {
+            decodeJobs[index]?.cancel()
+            decodeJobs.remove(index)
+            prefetchSet.remove(index)
+        }
+
+        // 如果正在解码中，跳过
+        if (prefetchSet.contains(index)) {
+            return
+        }
+
         prefetchSet.add(index)
+        val job = viewModelScope.launch(if (highPriority) kotlinx.coroutines.Dispatchers.Main else kotlinx.coroutines.Dispatchers.Default) {
+            try {
+                comicPicImageState.decode(context)
+            } finally {
+                decodeJobs.remove(index)
+            }
+        }
+        decodeJobs[index] = job
     }
 
     fun triggerToolBar() {
